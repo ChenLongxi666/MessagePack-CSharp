@@ -1,65 +1,77 @@
-﻿using MessagePack.Formatters;
-using System.Collections.Immutable;
+﻿// Copyright (c) All contributors. All rights reserved.
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
+
 using System;
+using System.Buffers;
+using System.Collections.Immutable;
+using MessagePack.Formatters;
+
+#pragma warning disable SA1649 // File name should match first type name
 
 namespace MessagePack.ImmutableCollection
 {
     // Immutablearray<T>.Enumerator is 'not' IEnumerator<T>, can't use abstraction layer.
     public class ImmutableArrayFormatter<T> : IMessagePackFormatter<ImmutableArray<T>>
     {
-        public int Serialize(ref byte[] bytes, int offset, ImmutableArray<T> value, IFormatterResolver formatterResolver)
+        public void Serialize(ref MessagePackWriter writer, ImmutableArray<T> value, MessagePackSerializerOptions options)
         {
-            if (value == null)
+            if (value.IsDefault)
             {
-                return MessagePackBinary.WriteNil(ref bytes, offset);
+                writer.WriteNil();
+            }
+            else if (value.IsEmpty)
+            {
+                writer.WriteArrayHeader(0);
             }
             else
             {
-                var startOffset = offset;
-                var formatter = formatterResolver.GetFormatterWithVerify<T>();
+                IMessagePackFormatter<T> formatter = options.Resolver.GetFormatterWithVerify<T>();
 
-                offset += MessagePackBinary.WriteArrayHeader(ref bytes, offset, value.Length);
-
-                foreach (var item in value)
+                writer.WriteArrayHeader(value.Length);
+                foreach (T item in value)
                 {
-                    offset += formatter.Serialize(ref bytes, offset, item, formatterResolver);
+                    formatter.Serialize(ref writer, item, options);
                 }
-
-                return offset - startOffset;
             }
         }
 
-        public ImmutableArray<T> Deserialize(byte[] bytes, int offset, IFormatterResolver formatterResolver, out int readSize)
+        public ImmutableArray<T> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
         {
-            if (MessagePackBinary.IsNil(bytes, offset))
+            if (reader.TryReadNil())
             {
-                readSize = 1;
-                return ImmutableArray<T>.Empty;
+                return default;
             }
             else
             {
-                var startOffset = offset;
-                var formatter = formatterResolver.GetFormatterWithVerify<T>();
-
-                var len = MessagePackBinary.ReadArrayHeader(bytes, offset, out readSize);
-                offset += readSize;
-
-                var builder = ImmutableArray.CreateBuilder<T>(len);
-                for (int i = 0; i < len; i++)
+                var len = reader.ReadArrayHeader();
+                if (len == 0)
                 {
-                    builder.Add(formatter.Deserialize(bytes, offset, formatterResolver, out readSize));
-                    offset += readSize;
+                    return ImmutableArray<T>.Empty;
                 }
-                readSize = offset - startOffset;
 
-                return builder.ToImmutable();
+                IMessagePackFormatter<T> formatter = options.Resolver.GetFormatterWithVerify<T>();
+                ImmutableArray<T>.Builder builder = ImmutableArray.CreateBuilder<T>(len);
+                options.Security.DepthStep(ref reader);
+                try
+                {
+                    for (int i = 0; i < len; i++)
+                    {
+                        builder.Add(formatter.Deserialize(ref reader, options));
+                    }
+                }
+                finally
+                {
+                    reader.Depth--;
+                }
+
+                return builder.MoveToImmutable();
             }
         }
     }
 
     public class ImmutableListFormatter<T> : CollectionFormatterBase<T, ImmutableList<T>.Builder, ImmutableList<T>.Enumerator, ImmutableList<T>>
     {
-        protected override void Add(ImmutableList<T>.Builder collection, int index, T value)
+        protected override void Add(ImmutableList<T>.Builder collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection.Add(value);
         }
@@ -69,7 +81,7 @@ namespace MessagePack.ImmutableCollection
             return intermediateCollection.ToImmutable();
         }
 
-        protected override ImmutableList<T>.Builder Create(int count)
+        protected override ImmutableList<T>.Builder Create(int count, MessagePackSerializerOptions options)
         {
             return ImmutableList.CreateBuilder<T>();
         }
@@ -82,7 +94,7 @@ namespace MessagePack.ImmutableCollection
 
     public class ImmutableDictionaryFormatter<TKey, TValue> : DictionaryFormatterBase<TKey, TValue, ImmutableDictionary<TKey, TValue>.Builder, ImmutableDictionary<TKey, TValue>.Enumerator, ImmutableDictionary<TKey, TValue>>
     {
-        protected override void Add(ImmutableDictionary<TKey, TValue>.Builder collection, int index, TKey key, TValue value)
+        protected override void Add(ImmutableDictionary<TKey, TValue>.Builder collection, int index, TKey key, TValue value, MessagePackSerializerOptions options)
         {
             collection.Add(key, value);
         }
@@ -92,9 +104,9 @@ namespace MessagePack.ImmutableCollection
             return intermediateCollection.ToImmutable();
         }
 
-        protected override ImmutableDictionary<TKey, TValue>.Builder Create(int count)
+        protected override ImmutableDictionary<TKey, TValue>.Builder Create(int count, MessagePackSerializerOptions options)
         {
-            return ImmutableDictionary.CreateBuilder<TKey, TValue>();
+            return ImmutableDictionary.CreateBuilder<TKey, TValue>(options.Security.GetEqualityComparer<TKey>());
         }
 
         protected override ImmutableDictionary<TKey, TValue>.Enumerator GetSourceEnumerator(ImmutableDictionary<TKey, TValue> source)
@@ -105,7 +117,7 @@ namespace MessagePack.ImmutableCollection
 
     public class ImmutableHashSetFormatter<T> : CollectionFormatterBase<T, ImmutableHashSet<T>.Builder, ImmutableHashSet<T>.Enumerator, ImmutableHashSet<T>>
     {
-        protected override void Add(ImmutableHashSet<T>.Builder collection, int index, T value)
+        protected override void Add(ImmutableHashSet<T>.Builder collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection.Add(value);
         }
@@ -115,9 +127,9 @@ namespace MessagePack.ImmutableCollection
             return intermediateCollection.ToImmutable();
         }
 
-        protected override ImmutableHashSet<T>.Builder Create(int count)
+        protected override ImmutableHashSet<T>.Builder Create(int count, MessagePackSerializerOptions options)
         {
-            return ImmutableHashSet.CreateBuilder<T>();
+            return ImmutableHashSet.CreateBuilder<T>(options.Security.GetEqualityComparer<T>());
         }
 
         protected override ImmutableHashSet<T>.Enumerator GetSourceEnumerator(ImmutableHashSet<T> source)
@@ -128,7 +140,7 @@ namespace MessagePack.ImmutableCollection
 
     public class ImmutableSortedDictionaryFormatter<TKey, TValue> : DictionaryFormatterBase<TKey, TValue, ImmutableSortedDictionary<TKey, TValue>.Builder, ImmutableSortedDictionary<TKey, TValue>.Enumerator, ImmutableSortedDictionary<TKey, TValue>>
     {
-        protected override void Add(ImmutableSortedDictionary<TKey, TValue>.Builder collection, int index, TKey key, TValue value)
+        protected override void Add(ImmutableSortedDictionary<TKey, TValue>.Builder collection, int index, TKey key, TValue value, MessagePackSerializerOptions options)
         {
             collection.Add(key, value);
         }
@@ -138,7 +150,7 @@ namespace MessagePack.ImmutableCollection
             return intermediateCollection.ToImmutable();
         }
 
-        protected override ImmutableSortedDictionary<TKey, TValue>.Builder Create(int count)
+        protected override ImmutableSortedDictionary<TKey, TValue>.Builder Create(int count, MessagePackSerializerOptions options)
         {
             return ImmutableSortedDictionary.CreateBuilder<TKey, TValue>();
         }
@@ -151,7 +163,7 @@ namespace MessagePack.ImmutableCollection
 
     public class ImmutableSortedSetFormatter<T> : CollectionFormatterBase<T, ImmutableSortedSet<T>.Builder, ImmutableSortedSet<T>.Enumerator, ImmutableSortedSet<T>>
     {
-        protected override void Add(ImmutableSortedSet<T>.Builder collection, int index, T value)
+        protected override void Add(ImmutableSortedSet<T>.Builder collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection.Add(value);
         }
@@ -161,7 +173,7 @@ namespace MessagePack.ImmutableCollection
             return intermediateCollection.ToImmutable();
         }
 
-        protected override ImmutableSortedSet<T>.Builder Create(int count)
+        protected override ImmutableSortedSet<T>.Builder Create(int count, MessagePackSerializerOptions options)
         {
             return ImmutableSortedSet.CreateBuilder<T>();
         }
@@ -175,17 +187,17 @@ namespace MessagePack.ImmutableCollection
     // not best for performance(does not use ImmutableQueue<T>.Enumerator)
     public class ImmutableQueueFormatter<T> : CollectionFormatterBase<T, ImmutableQueueBuilder<T>, ImmutableQueue<T>>
     {
-        protected override void Add(ImmutableQueueBuilder<T> collection, int index, T value)
+        protected override void Add(ImmutableQueueBuilder<T> collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection.Add(value);
         }
 
         protected override ImmutableQueue<T> Complete(ImmutableQueueBuilder<T> intermediateCollection)
         {
-            return intermediateCollection.q;
+            return intermediateCollection.Q;
         }
 
-        protected override ImmutableQueueBuilder<T> Create(int count)
+        protected override ImmutableQueueBuilder<T> Create(int count, MessagePackSerializerOptions options)
         {
             return new ImmutableQueueBuilder<T>();
         }
@@ -194,7 +206,7 @@ namespace MessagePack.ImmutableCollection
     // not best for performance(does not use ImmutableQueue<T>.Enumerator)
     public class ImmutableStackFormatter<T> : CollectionFormatterBase<T, T[], ImmutableStack<T>>
     {
-        protected override void Add(T[] collection, int index, T value)
+        protected override void Add(T[] collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection[collection.Length - 1 - index] = value;
         }
@@ -204,15 +216,15 @@ namespace MessagePack.ImmutableCollection
             return ImmutableStack.CreateRange(intermediateCollection);
         }
 
-        protected override T[] Create(int count)
+        protected override T[] Create(int count, MessagePackSerializerOptions options)
         {
-            return new T[count];
+            return count == 0 ? Array.Empty<T>() : new T[count];
         }
     }
 
     public class InterfaceImmutableListFormatter<T> : CollectionFormatterBase<T, ImmutableList<T>.Builder, IImmutableList<T>>
     {
-        protected override void Add(ImmutableList<T>.Builder collection, int index, T value)
+        protected override void Add(ImmutableList<T>.Builder collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection.Add(value);
         }
@@ -222,7 +234,7 @@ namespace MessagePack.ImmutableCollection
             return intermediateCollection.ToImmutable();
         }
 
-        protected override ImmutableList<T>.Builder Create(int count)
+        protected override ImmutableList<T>.Builder Create(int count, MessagePackSerializerOptions options)
         {
             return ImmutableList.CreateBuilder<T>();
         }
@@ -230,7 +242,7 @@ namespace MessagePack.ImmutableCollection
 
     public class InterfaceImmutableDictionaryFormatter<TKey, TValue> : DictionaryFormatterBase<TKey, TValue, ImmutableDictionary<TKey, TValue>.Builder, IImmutableDictionary<TKey, TValue>>
     {
-        protected override void Add(ImmutableDictionary<TKey, TValue>.Builder collection, int index, TKey key, TValue value)
+        protected override void Add(ImmutableDictionary<TKey, TValue>.Builder collection, int index, TKey key, TValue value, MessagePackSerializerOptions options)
         {
             collection.Add(key, value);
         }
@@ -240,15 +252,15 @@ namespace MessagePack.ImmutableCollection
             return intermediateCollection.ToImmutable();
         }
 
-        protected override ImmutableDictionary<TKey, TValue>.Builder Create(int count)
+        protected override ImmutableDictionary<TKey, TValue>.Builder Create(int count, MessagePackSerializerOptions options)
         {
-            return ImmutableDictionary.CreateBuilder<TKey, TValue>();
+            return ImmutableDictionary.CreateBuilder<TKey, TValue>(options.Security.GetEqualityComparer<TKey>());
         }
     }
 
     public class InterfaceImmutableSetFormatter<T> : CollectionFormatterBase<T, ImmutableHashSet<T>.Builder, IImmutableSet<T>>
     {
-        protected override void Add(ImmutableHashSet<T>.Builder collection, int index, T value)
+        protected override void Add(ImmutableHashSet<T>.Builder collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection.Add(value);
         }
@@ -258,25 +270,25 @@ namespace MessagePack.ImmutableCollection
             return intermediateCollection.ToImmutable();
         }
 
-        protected override ImmutableHashSet<T>.Builder Create(int count)
+        protected override ImmutableHashSet<T>.Builder Create(int count, MessagePackSerializerOptions options)
         {
-            return ImmutableHashSet.CreateBuilder<T>();
+            return ImmutableHashSet.CreateBuilder<T>(options.Security.GetEqualityComparer<T>());
         }
     }
 
     public class InterfaceImmutableQueueFormatter<T> : CollectionFormatterBase<T, ImmutableQueueBuilder<T>, IImmutableQueue<T>>
     {
-        protected override void Add(ImmutableQueueBuilder<T> collection, int index, T value)
+        protected override void Add(ImmutableQueueBuilder<T> collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection.Add(value);
         }
 
         protected override IImmutableQueue<T> Complete(ImmutableQueueBuilder<T> intermediateCollection)
         {
-            return intermediateCollection.q;
+            return intermediateCollection.Q;
         }
 
-        protected override ImmutableQueueBuilder<T> Create(int count)
+        protected override ImmutableQueueBuilder<T> Create(int count, MessagePackSerializerOptions options)
         {
             return new ImmutableQueueBuilder<T>();
         }
@@ -284,7 +296,7 @@ namespace MessagePack.ImmutableCollection
 
     public class InterfaceImmutableStackFormatter<T> : CollectionFormatterBase<T, T[], IImmutableStack<T>>
     {
-        protected override void Add(T[] collection, int index, T value)
+        protected override void Add(T[] collection, int index, T value, MessagePackSerializerOptions options)
         {
             collection[collection.Length - 1 - index] = value;
         }
@@ -294,22 +306,20 @@ namespace MessagePack.ImmutableCollection
             return ImmutableStack.CreateRange(intermediateCollection);
         }
 
-        protected override T[] Create(int count)
+        protected override T[] Create(int count, MessagePackSerializerOptions options)
         {
-            return new T[count];
+            return count == 0 ? Array.Empty<T>() : new T[count];
         }
     }
 
-
     // pseudo builders
-
     public class ImmutableQueueBuilder<T>
     {
-        public ImmutableQueue<T> q = ImmutableQueue<T>.Empty;
+        public ImmutableQueue<T> Q { get; set; } = ImmutableQueue<T>.Empty;
 
         public void Add(T value)
         {
-            q = q.Enqueue(value);
+            this.Q = this.Q.Enqueue(value);
         }
     }
 }
